@@ -9,6 +9,24 @@ import time
 import os
 import requests 
 
+# --- 全局配置與 LLM 設定 ---
+# 注意：在 Canvas 環境中，API Key 會被自動注入到 fetch 請求中。
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key="
+API_KEY = "" # 保持為空字串，由運行環境提供
+DEFAULT_DESTINATION = "首爾/仁川 (ICN)"
+
+# 專門針對用戶 persona (邏輯思考、專業、實用) 設定的系統指令
+SYSTEM_PROMPT = """
+你是一位專業的旅遊風險評估顧問，同時具備科學客觀的思辨能力。
+你的任務是根據提供的天氣預報數據，為用戶生成實用、務實且具備邏輯性的穿衣建議。
+請嚴格根據以下用戶屬性來調整你的建議：
+1. 用戶身份：注重效率與專業度的中年女性，偏向邏輯思考，無美感天份，喜歡知識與新事物。
+2. 建議語氣：正式、專業、企業術語、開門見山、具備前瞻性觀點，追求功能性與實用性。
+3. 核心原則：建議必須基於功能性、實用性與舒適度，而非時尚或美感。
+4. 輸出要求：必須以「專案風險評估與功能性穿搭策略」為標題，並針對溫度、濕度、降雨三大風險因子提供具體的解決方案。
+請使用 Markdown 格式輸出。
+"""
+
 # --- Streamlit 頁面配置 ---
 st.set_page_config(
     layout="wide", 
@@ -67,7 +85,7 @@ def load_trip_data(db):
         st.error(f"❌ 讀取資料失敗：{e}")
         return None
 
-# --- 記帳資料讀取/監聽函式 (新增) ---
+# --- 記帳資料讀取/監聽函式 ---
 def get_all_expenses(db):
     """從 Firestore 實時監聽 expense_records 集合"""
     if not db:
@@ -109,7 +127,7 @@ def add_expense_record(db, record_data):
         st.error(f"❌ 記帳記錄寫入失敗：{e}")
         return False
 
-# --- 行程資料操作函式 (修正：移除 order_by 以繞過複合索引限制) ---
+# --- 行程資料操作函式 ---
 def get_daily_itinerary(db, date_str):
     """
     從 Firestore 讀取特定日期的行程記錄。
@@ -220,27 +238,16 @@ def get_exchange_rate(from_currency, to_currency):
         # 為了避免 API 金鑰問題，目前先固定回傳值
         return 1.0
         
-# --- 新增: 計算行程日期範圍的函式 ---
+# --- 計算行程日期範圍的函式 ---
 def calculate_trip_dates(flights):
     """
     根據航班資料計算整個旅程的日期範圍。
-    Args:
-        flights (list): 航班記錄清單，每個項目包含 'date' 欄位 (e.g., "2025-06-15")。
-    Returns:
-        list: 包含旅程所有日期的字串列表 (e.g., ["2025-06-15", "2025-06-16", ...])。
     """
     if not flights:
         return [datetime.now().strftime("%Y-%m-%d")] # 預設今天
 
     # 1. 提取所有有效的日期
-    date_strings = []
-    for flight in flights:
-        date_str = flight.get('date')
-        if date_str:
-            try:
-                date_strings.append(date_str)
-            except Exception:
-                continue
+    date_strings = [f.get('date') for f in flights if f.get('date')]
 
     if not date_strings:
         return [datetime.now().strftime("%Y-%m-%d")]
@@ -271,6 +278,102 @@ def calculate_trip_dates(flights):
     return trip_dates
 
 
+# --- [新增] 旅遊目的地提取函式 ---
+def get_destination_city(flights):
+    """
+    從航班資訊中提取目的地城市。優先選擇回程或去程的 'to' 欄位。
+    """
+    if not flights:
+        return DEFAULT_DESTINATION # 預設首爾
+    
+    # 查找所有有效的目的地
+    destinations = [
+        f.get('to') for f in flights 
+        if f.get('to') and f.get('type') in ["去程 (Outbound)", "回程 (Return)"]
+    ]
+    
+    # 返回第一個非空目的地，或預設值
+    return destinations[0] if destinations else DEFAULT_DESTINATION
+
+# --- [新增] 天氣數據模擬函式 ---
+def simulate_weather_forecast(dates, city):
+    """
+    由於無法獲取長程準確預報，此函數模擬六月份首爾的變動天氣。
+    模擬數據基於 Google Search 提供的六月氣候資訊 (18°C ~ 27°C, 多雨/潮濕)。
+    """
+    mock_forecast = []
+    
+    # 根據日期長度決定天氣模式
+    num_days = len(dates)
+    
+    for i, date_str in enumerate(dates):
+        # 溫度變化: 20°C - 28°C
+        low_temp = 20 + (i % 3) 
+        high_temp = 25 + (i % 4) 
+        
+        # 決定天氣 (前半段晴時多雲，後半段多雨，模擬梅雨季開始)
+        if i < num_days / 2:
+            weather_options = ["晴時多雲", "局部陣雨", "多雲"]
+            weather = weather_options[i % 3]
+            humidity = f"{65 + (i % 5)}%"
+        else:
+            weather_options = ["陰天轉陣雨", "大雨或雷雨", "持續降雨"]
+            weather = weather_options[i % 3]
+            humidity = f"{75 + (i % 5)}%"
+
+        mock_forecast.append({
+            "date": date_str,
+            "day_of_week": datetime.strptime(date_str, "%Y-%m-%d").strftime("%a"),
+            "high_c": high_temp,
+            "low_c": low_temp,
+            "weather": weather,
+            "humidity": humidity,
+            "wind": "微風"
+        })
+        
+    return mock_forecast
+
+# --- [新增] LLM API 呼叫函式 ---
+def get_clothing_suggestion(weather_summary):
+    """呼叫 Gemini API 獲取穿衣建議。"""
+    
+    # 構建 LLM 的 User Prompt
+    user_query = f"請根據以下天氣預報摘要，提供專業且功能性的穿衣建議：\n\n{weather_summary}"
+
+    payload = {
+        "contents": [{"parts": [{"text": user_query}]}],
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "config": {
+            "temperature": 0.2
+        }
+    }
+    
+    # 由於 Streamlit 環境無法直接使用 fetch/JavaScript API，我們使用 requests 模組進行模擬
+    # 在 Canvas 環境中，如果 API_KEY 為空，runtime 會自動處理認證。
+    try:
+        response = requests.post(
+            GEMINI_API_URL + API_KEY,
+            headers={'Content-Type': 'application/json'},
+            data=json.dumps(payload)
+        )
+        response.raise_for_status() # 檢查 HTTP 錯誤
+        
+        result = response.json()
+        
+        # 提取結果文本
+        text = result['candidates'][0]['content']['parts'][0]['text']
+        return text
+        
+    except requests.exceptions.RequestException as e:
+        # 處理 API 請求失敗
+        st.error(f"❌ Gemini API 呼叫失敗。錯誤資訊: {e}")
+        return "無法獲取 AI 建議。請檢查 API 連線狀態。"
+    except Exception as e:
+        # 處理結果解析失敗
+        st.error(f"❌ AI 回應解析失敗。錯誤資訊: {e}")
+        return "AI 回應格式錯誤，無法解析。"
+
+
 # --- 主要程式邏輯 ---
 if db:
     # 執行資料讀取
@@ -286,7 +389,7 @@ if db:
         
         # 從 Firebase 獲取當前旅伴清單 - 預設為空列表 []
         current_companions = trip_data.get('companions', [])
-        current_flights = trip_data.get('flights', []) # 新增: 獲取航班資訊
+        current_flights = trip_data.get('flights', []) # 獲取航班資訊
         
         # --- 核心更新函式 ---
         def update_companions_in_firebase(new_list):
@@ -299,6 +402,7 @@ if db:
                 st.error(f"❌ 旅伴清單寫入失敗。錯誤代碼: {e}")
 
         # --- 分頁導航 ---
+        # 頁面標題調整: 將「天氣」調整到第三個位置 (Index 2)
         tab_titles = ["📄 資訊", "🗺️ 行程", "☀️ 天氣", "💰 記帳", "💬 助手"]
         tabs = st.tabs(tab_titles)
 
@@ -542,7 +646,7 @@ if db:
                              st.info("旅伴清單目前已清空。")
         # [END_TAB_0]
         
-        with tabs[1]: # 🗺️ 行程 頁面 (核心重構)
+        with tabs[1]: # 🗺️ 行程 頁面
             st.header("每日行程細節")
             
             # --- 1. 計算日期範圍並設定 Session State ---
@@ -679,11 +783,64 @@ if db:
                         except ValueError:
                             st.error("時間格式錯誤。請使用 HH:MM (例如 09:30) 格式。")
 
-        with tabs[2]: # ☀️ 天氣 頁面 (Placeholder)
-            st.header("首爾即時天氣")
-            st.info("可規劃在此處展示即時天氣或氣溫預報圖。")
+        with tabs[2]: # ☀️ 天氣 頁面 (新增功能)
+            st.header("旅程天氣預報與機能性穿搭策略")
+            
+            trip_dates = calculate_trip_dates(current_flights)
+            destination = get_destination_city(current_flights)
+            
+            if len(trip_dates) <= 1 and current_flights:
+                st.warning("請在「資訊」頁面設定去程和回程兩個航班日期 (YYYY-MM-DD)，以產生完整的旅行日期範圍，用於天氣預報。")
 
-        with tabs[3]: # 💰 記帳 頁面 (核心功能重構)
+            st.subheader(f"📍 {destination} 旅行期間 ({trip_dates[0]} 至 {trip_dates[-1]})")
+            st.info("由於旅遊日期較遠（例如 2025 年 6 月），本系統採用**模擬天氣數據**，基於首爾六月平均氣候（高溫、潮濕、多雨）進行邏輯推演。實際穿搭仍需參考出發前一週的準確預報。")
+            st.markdown("---")
+
+            # --- 1. 產生模擬天氣數據 ---
+            # 存儲在 session state 避免不必要的重複生成
+            weather_key = f"weather_{trip_dates[0]}_{trip_dates[-1]}"
+            if weather_key not in st.session_state:
+                st.session_state[weather_key] = simulate_weather_forecast(trip_dates, destination)
+            
+            forecast_data = st.session_state[weather_key]
+            
+            # --- 2. 顯示表格預報 ---
+            st.markdown("### ☁️ 模擬每日天氣概覽 (攝氏)")
+            
+            df_weather = pd.DataFrame(forecast_data)
+            df_weather = df_weather.rename(columns={
+                'date': '日期', 'day_of_week': '週次', 'high_c': '高溫', 'low_c': '低溫', 
+                'weather': '天氣狀況', 'humidity': '濕度', 'wind': '風速'
+            })
+            st.dataframe(df_weather[['日期', '週次', '天氣狀況', '高溫', '低溫', '濕度']], 
+                         hide_index=True, use_container_width=True)
+
+            # --- 3. LLM 穿搭建議模塊 ---
+            st.markdown("---")
+            st.markdown("### 🧠 AI 機能性穿搭顧問 (Gemini-Powered)")
+            
+            # 只有在用戶點擊按鈕時才執行 API 呼叫
+            if st.button("🚀 生成專業穿搭策略報告 (使用 Gemini AI)"):
+                
+                # 準備傳給 LLM 的天氣摘要 (Markdown 格式)
+                weather_summary_text = df_weather.to_markdown(index=False)
+                
+                with st.spinner("⏳ 正在執行 LLM 任務並產出穿搭策略報告..."):
+                    
+                    # 執行 LLM 呼叫
+                    ai_suggestion = get_clothing_suggestion(weather_summary_text)
+                    
+                    # 將結果存入 session state
+                    st.session_state.ai_clothing_suggestion = ai_suggestion
+            
+            # 顯示上次/最新的 AI 建議
+            if 'ai_clothing_suggestion' in st.session_state:
+                st.markdown(st.session_state.ai_clothing_suggestion)
+            else:
+                 st.info("點擊上方按鈕，AI 將根據模擬天氣數據，為您生成一份專業的機能性穿搭策略報告。")
+
+
+        with tabs[3]: # 💰 記帳 頁面
             st.header("協作記帳本")
             
             # --- 0. 讀取所有記帳記錄 ---
