@@ -15,33 +15,35 @@ st.set_page_config(
 )
 
 # --- Firebase 連線與初始化 ---
-@st.cache_resource
+# 將 @st.cache_resource 拿掉，以便在找不到檔案時顯示錯誤
 def initialize_firestore():
-    """使用 Streamlit Secrets 中的 JSON 憑證初始化 Firebase"""
+    """使用服務帳戶檔案來初始化 Firebase"""
+    
+    # 定義金鑰檔案在 Streamlit Cloud 環境中的預期路徑
+    key_file_path = "firebase_key.json" 
+    
     try:
-        # 1. 從 Streamlit Secrets 讀取 JSON 內容
-        # 這裡的 "firebase" 對應到您 Secrets 設定的 [firebase] 區塊
-        secrets_json = st.secrets["firebase"]["key_json"]
-        
-        # 2. 將 JSON 字串解析成 Python 字典
-        service_account_info = json.loads(secrets_json)
-        
-        # 3. 檢查是否已初始化，避免重複初始化錯誤
+        # 1. 檢查檔案是否存在 (假設檔案已被部署)
+        import os
+        if not os.path.exists(key_file_path):
+            st.error(f"❌ 關鍵檔案 '{key_file_path}' 缺失。請確保該檔案已上傳至 GitHub 倉庫根目錄！")
+            return None
+
+        # 2. 檢查是否已初始化，避免重複初始化錯誤
         if not firebase_admin._apps:
-            # 4. 使用憑證資訊初始化 Firebase Admin SDK
-            cred = credentials.Certificate(service_account_info)
+            # 3. 從檔案路徑讀取憑證
+            cred = credentials.Certificate(key_file_path)
             firebase_admin.initialize_app(cred)
             
-        # 5. 連線到 Firestore 資料庫
+        # 4. 連線到 Firestore 資料庫
         return firestore.client()
         
     except Exception as e:
-        st.error(f"❌ Firebase 連線失敗！請檢查 Streamlit Secrets 內容：{e}")
-        st.info("請確認您在 Secrets 中的 [firebase] 區塊下，key_json 是否包含了完整的 JSON 內容，且格式正確。")
+        st.error(f"❌ Firebase 連線失敗 (檔案模式)。請檢查 '{key_file_path}' 檔案內容是否完整無損：{e}")
         return None
 
 # 初始化連線
-db = initialize_firestore()
+db = initialize_firestore() 
 
 # --- 資料讀取函式 ---
 def load_trip_data(db):
