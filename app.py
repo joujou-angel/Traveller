@@ -225,15 +225,15 @@ with st.expander("👥 旅伴管理 (用於記帳分攤)", expanded=True):
                         st.session_state.companions = ["自己"]
                         st.experimental_rerun()
         
-        with tabs[1]: # 🗺️ 行程 頁面 (Placeholder)
+with tabs[1]: # 🗺️ 行程 頁面 (Placeholder)
             st.header("行程細節")
             st.info("此處將用於展示每日行程清單與地圖。")
 
-        with tabs[2]: # ☀️ 天氣 頁面 (Placeholder)
+with tabs[2]: # ☀️ 天氣 頁面 (Placeholder)
             st.header("首爾即時天氣")
             st.info("可規劃在此處展示即時天氣或氣溫預報圖。")
 
-        with tabs[3]: # 💰 記帳 頁面 (Placeholder)
+with tabs[3]: # 💰 記帳 頁面 (Placeholder)
             st.header("協作記帳本")
             st.warning("💡 記帳功能將在下一步利用 Firebase 的寫入功能實現持久化。")
             if st.session_state.companions:
