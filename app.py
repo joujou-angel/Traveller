@@ -89,37 +89,121 @@ if db:
         with tabs[0]: # 📄 資訊 頁面 (使用 Firestore 資料)
             st.header("資訊總覽")
             
-            # --- 航班資訊卡片 ---
+            # --- 航班資訊卡片 (整合編輯與顯示) ---
+            flight_types = ["去程 (Outbound)", "回程 (Return)", "轉機 (Layover)"]
+            current_flights = trip_data.get('flights', [])
+
+            # 設置編輯狀態和暫存資料的 Session State
+            if 'edit_flights' not in st.session_state:
+                st.session_state.edit_flights = False
+            # 只有在非編輯狀態讀取時才重置，否則保留編輯中的數據
+            if 'flights_temp' not in st.session_state or not st.session_state.edit_flights:
+                 # 確保 temp list 始終與當前資料同步
+                st.session_state.flights_temp = current_flights[:]
+
             st.markdown("""
                 <div style='padding: 15px; border-radius: 10px; border: 1px solid #C4D7ED; background-color: #E6EFFD; margin-bottom: 20px;'>
                 <h3 style='margin: 0; padding-bottom: 10px; color: #1E40AF;'>✈️ 航班資訊</h3>
             """, unsafe_allow_html=True)
-            
-            flights = trip_data.get('flights', [])
-            for flight in flights:
-                with st.container(border=True):
-                    col_type, col_info, col_time = st.columns([1, 2, 2])
-                    
-                    with col_type:
-                        st.markdown(f"**{flight.get('type', '單程')}航班**")
-                        st.markdown(f"**{flight.get('code', 'N/A')}**")
 
-                    with col_info:
-                        st.markdown(f"**日期:** {flight.get('date', 'N/A')}")
-                        st.markdown(f"**訂位代碼:** `{flight.get('pnr', 'N/A')}`")
-                        st.markdown(f"**航廈:** {flight.get('terminal', 'N/A')}")
+            # 編輯/取消編輯按鈕
+            if st.button("✏️ 編輯/新增航班資訊", key="edit_flights_toggle"):
+                st.session_state.edit_flights = not st.session_state.edit_flights
+                # 重置 temp list 以確保資料新鮮度，或開始編輯
+                st.session_state.flights_temp = current_flights[:] 
+                st.rerun()
+
+            # --- 編輯表單 (只有在編輯狀態下顯示) ---
+            if st.session_state.edit_flights:
+                
+                # --- 新增航班按鈕 (必須在 st.form 之外，以觸發即時 RERUN) ---
+                if st.button("➕ 點擊新增一筆航班", key="add_flight_btn"):
+                    st.session_state.flights_temp.append({
+                        "type": flight_types[0], "date": "", "code": "", "pnr": "", 
+                        "terminal": "", "from": "", "dep": "", "to": "", "arr": ""
+                    })
+                    st.rerun() # 立即重繪以顯示新欄位
+                    
+                with st.form(key='flights_edit_form'):
+                    st.markdown("##### 📝 航班編輯表單 - 同步寫回 Firebase")
+                    st.markdown("---")
+                    
+                    # 遍歷並編輯現有航班
+                    for i, flight in enumerate(st.session_state.flights_temp):
+                        st.markdown(f"#### 航班 #{i + 1} - {flight.get('type', '單程')}")
                         
-                    with col_time:
-                        st.markdown(f"**{flight.get('from', 'N/A')} ({flight.get('dep', 'N/A')}) → {flight.get('to', 'N/A')} ({flight.get('arr', 'N/A')})**")
+                        cols = st.columns([2, 2, 1])
+
+                        with cols[0]:
+                            # 允許選擇去程/回程/轉機
+                            flight['type'] = st.selectbox("類型", options=flight_types, 
+                                index=flight_types.index(flight.get('type', flight_types[0])) if flight.get('type') in flight_types else 0,
+                                key=f"type_{i}"
+                            )
+                            flight['date'] = st.text_input("日期", value=flight.get("date", ""), key=f"date_{i}")
+                            flight['code'] = st.text_input("航班編號", value=flight.get("code", ""), key=f"code_{i}")
+                            flight['pnr'] = st.text_input("訂位代碼", value=flight.get("pnr", ""), key=f"pnr_{i}")
+                            
+                        with cols[1]:
+                            flight['from'] = st.text_input("出發地 (e.g. TPE)", value=flight.get("from", ""), key=f"from_{i}")
+                            flight['dep'] = st.text_input("預計起飛 (HH:MM)", value=flight.get("dep", ""), key=f"dep_{i}")
+                            flight['to'] = st.text_input("目的地 (e.g. ICN)", value=flight.get("to", ""), key=f"to_{i}")
+                            flight['arr'] = st.text_input("預計抵達 (HH:MM)", value=flight.get("arr", ""), key=f"arr_{i}")
+                            flight['terminal'] = st.text_input("航廈資訊", value=flight.get("terminal", ""), key=f"terminal_{i}")
+
+                        with cols[2]:
+                            st.markdown("<br>"*5, unsafe_allow_html=True)
+                            # 刪除按鈕：點擊後移除該項目並觸發重繪
+                            if st.form_submit_button(f"❌ 刪除航班 #{i + 1}", help="點擊此按鈕將移除此航班並重新整理表單", key=f"delete_in_form_{i}"):
+                                st.session_state.flights_temp.pop(i) 
+                                st.session_state.edit_flights = True # 保持編輯模式
+                                st.rerun() 
+                        
+                        st.markdown("---")
+                        
+                    submitted = st.form_submit_button("✅ 確認儲存所有航班更新至 Firebase")
+
+                    if submitted:
+                        final_flights = st.session_state.flights_temp
+                        
+                        try:
+                            # 執行 Firestore 更新操作
+                            master_info_ref.update({"flights": final_flights})
+                            st.success("✅ 航班資訊已成功更新並同步至 Firebase！")
+                            st.session_state.edit_flights = False
+                            del st.session_state.flights_temp # 清理暫存狀態
+                            st.rerun() 
+                        except Exception as e:
+                            st.error(f"❌ 資料寫入失敗。錯誤代碼: {e}")
+                            
+            # --- 航班資訊顯示 (非編輯狀態) ---
+            if not st.session_state.edit_flights:
+                flights_to_display = current_flights
+                if not flights_to_display:
+                    st.info("目前尚未設定任何航班資訊。請點擊 '編輯/新增航班資訊' 按鈕進行新增。")
+                
+                for flight in flights_to_display:
+                    with st.container(border=True):
+                        col_type, col_info, col_time = st.columns([1, 2, 2])
+                        
+                        with col_type:
+                            st.markdown(f"**{flight.get('type', '單程')}航班**")
+                            st.markdown(f"**{flight.get('code', 'N/A')}**")
+
+                        with col_info:
+                            st.markdown(f"**日期:** {flight.get('date', 'N/A')}")
+                            st.markdown(f"**訂位代碼:** `{flight.get('pnr', 'N/A')}`")
+                            st.markdown(f"**航廈:** {flight.get('terminal', 'N/A')}")
+                            
+                        with col_time:
+                            st.markdown(f"**{flight.get('from', 'N/A')} ({flight.get('dep', 'N/A')}) → {flight.get('to', 'N/A')} ({flight.get('arr', 'N/A')})**")
                         
             st.markdown("</div>", unsafe_allow_html=True)
 
 
             # --- 住宿資訊卡片 (整合編輯與顯示) ---
-            # 修正：將變數名稱統一為 trip_data 且區塊已在 if trip_data: 內
             current_hotel = trip_data.get("hotel", {})
             
-            # --- [整合舊版功能] 客製化 HTML 樣式和標題 ---
             st.markdown("""
             <div style='padding: 15px; border-radius: 10px; border: 1px solid #F5D0A9; background-color: #FEF3E6; margin-bottom: 20px;'>
             <h3 style='margin: 0; padding-bottom: 10px; color: #9A3412;'>🏨 住宿資訊</h3>
