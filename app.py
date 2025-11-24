@@ -306,6 +306,7 @@ if db:
                 else:
                     st.info("目前旅伴清單為空。請新增您的暱稱和其他旅伴。")
                 
+                # 輸入欄位的 key 是 "new_comp"
                 new_companion = st.text_input("新增旅伴暱稱", key="new_comp")
                 
                 col_add, col_clear = st.columns(2)
@@ -315,6 +316,8 @@ if db:
                         # 檢查：非空且不在現有清單中
                         if new_companion and new_companion not in current_companions:
                             new_list = current_companions + [new_companion]
+                            # 新增邏輯：成功寫入前，將 session_state 設為空字串以清除輸入欄位
+                            st.session_state.new_comp = "" 
                             update_companions_in_firebase(new_list)
                         elif new_companion:
                              st.warning(f"旅伴 '{new_companion}' 已存在於清單中。")
