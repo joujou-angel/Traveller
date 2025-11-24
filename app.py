@@ -7,6 +7,7 @@ from firebase_admin import credentials
 from firebase_admin import firestore
 import time
 import os
+import requests # 新增：用於呼叫外部 API (如匯率)
 
 # --- Streamlit 頁面配置 ---
 st.set_page_config(
@@ -56,7 +57,7 @@ def load_trip_data(db):
         
         if doc.exists:
             data = doc.to_dict()
-            st.success("✅ 資料已成功從 Firebase 讀取！")
+            # st.success("✅ 資料已成功從 Firebase 讀取！") # 避免過多成功提示
             return data
         else:
             st.warning("⚠️ Firestore 中找不到 'trip_data/master_info' 文件。請手動建立資料。")
@@ -64,6 +65,40 @@ def load_trip_data(db):
     except Exception as e:
         st.error(f"❌ 讀取資料失敗：{e}")
         return None
+
+# --- 記帳資料寫入函式 (新增) ---
+def add_expense_record(db, record_data):
+    """將新的記帳記錄寫入 Firestore 的 expense_records 集合中"""
+    if not db:
+        st.error("❌ 無法寫入記帳記錄：Firebase 連線失敗。")
+        return False
+    try:
+        # 使用 addDoc 寫入新的文件到 'expense_records' 集合
+        db.collection('expense_records').add(record_data)
+        st.success("✅ 記帳記錄已成功儲存！")
+        return True
+    except Exception as e:
+        st.error(f"❌ 記帳記錄寫入失敗：{e}")
+        return False
+
+
+# --- 匯率計算框架 (需呼叫外部 API 實作) ---
+@st.cache_data(ttl=3600) # 快取 1 小時
+def get_exchange_rate(from_currency, to_currency):
+    """
+    [待辦事項] 呼叫外部 API 獲取即時匯率。
+    目前使用固定值作為演示。
+    """
+    if from_currency == "TWD" and to_currency == "KRW":
+        # 假設 1 TWD = 40 KRW (用於演示)
+        return 40.0
+    elif from_currency == "KRW" and to_currency == "TWD":
+        # 假設 1 KRW = 0.025 TWD (用於演示)
+        return 0.025
+    else:
+        # 實際應用中，需呼叫 Google Search 或專門的匯率 API
+        # 為了避免 API 金鑰問題，目前先固定回傳值
+        return 1.0
 
 # --- 主要程式邏輯 ---
 if db:
@@ -340,16 +375,108 @@ if db:
             st.header("首爾即時天氣")
             st.info("可規劃在此處展示即時天氣或氣溫預報圖。")
 
-        with tabs[3]: # 💰 記帳 頁面 (Placeholder)
+        with tabs[3]: # 💰 記帳 頁面 (核心功能重構)
             st.header("協作記帳本")
-            st.warning("💡 記帳功能將在下一步利用 Firebase 的寫入功能實現持久化。")
-            if current_companions:
-                st.subheader("旅伴分攤參考")
-                # 此處直接使用從 Firebase 讀取的 current_companions
-                st.write(f"可分攤的旅伴: {', '.join(current_companions)}")
+
+            # --- 1. 簡易匯率計算機 ---
+            st.markdown("### 💱 即時匯率計算 (演示功能)")
+            
+            col_from_currency, col_from_amount, col_equal, col_to_currency, col_to_amount = st.columns([1, 2, 0.5, 1, 2])
+            
+            with col_from_currency:
+                from_currency = st.selectbox("從", options=["KRW", "TWD", "USD"], index=0, key="from_cur")
+            with col_from_amount:
+                from_amount = st.number_input("金額", min_value=0.0, value=10000.0, step=100.0, key="from_amt")
+            with col_equal:
+                st.markdown("### =")
+            with col_to_currency:
+                to_currency = st.selectbox("換算為", options=["TWD", "KRW", "USD"], index=0, key="to_cur")
+
+            # 獲取匯率並計算結果
+            rate = get_exchange_rate(from_currency, to_currency)
+            to_amount = from_amount * rate
+            
+            with col_to_amount:
+                # 使用 text_input 模擬輸出，並禁用編輯
+                st.text_input("約為", value=f"{to_amount:,.2f}", disabled=True, key="to_amt_display")
+            
+            st.info(f"當前匯率: 1 {from_currency} 約等於 {rate:.4f} {to_currency} (目前為固定演示值)。")
+            st.markdown("---")
+            
+            # --- 2. 記帳輸入表單 ---
+            st.markdown("### 📝 新增一筆消費記錄")
+            
+            if not current_companions:
+                st.warning("請先在「資訊」頁面新增旅伴暱稱，才能進行記帳與分攤設定。")
             else:
-                 st.subheader("旅伴分攤參考")
-                 st.info("請先在「資訊」頁面新增旅伴才能進行分攤記帳。")
+                with st.form(key="expense_form"):
+                    # 基本資訊
+                    expense_name = st.text_input("消費項目", placeholder="例如：晚餐、計程車、景點門票", key="exp_name")
+                    
+                    col_date, col_category = st.columns(2)
+                    with col_date:
+                        expense_date = st.date_input("消費日期", value="today", key="exp_date")
+                    with col_category:
+                        categories = ["餐飲", "交通", "住宿", "門票/活動", "購物", "其他"]
+                        expense_category = st.selectbox("分類", options=categories, key="exp_category")
+
+                    col_amount, col_currency = st.columns(2)
+                    with col_amount:
+                        expense_amount = st.number_input("金額", min_value=0.01, value=10000.0, step=100.0, key="exp_amount")
+                    with col_currency:
+                        expense_currency = st.selectbox("幣別", options=["KRW", "TWD", "USD"], index=0, key="exp_currency")
+
+                    st.markdown("#### 誰先付的 (Payer)?")
+                    # 使用 radio button 確保只有一位付費者
+                    payer = st.radio(
+                        "選擇付費者",
+                        options=current_companions,
+                        index=0, # 預設選取第一個旅伴
+                        key="exp_payer",
+                        horizontal=True
+                    )
+
+                    st.markdown("#### 有誰要分攤這筆金額 (Splits)?")
+                    # 使用 multiselect 選擇所有分攤者 (預設全選)
+                    split_companions = st.multiselect(
+                        "選擇分攤者",
+                        options=current_companions,
+                        default=current_companions,
+                        key="exp_splits"
+                    )
+
+                    submitted = st.form_submit_button("✅ 儲存這筆帳目")
+
+                    if submitted:
+                        if not expense_name.strip():
+                            st.error("請輸入消費項目名稱。")
+                        elif not split_companions:
+                            st.error("請至少選擇一位分攤者。")
+                        else:
+                            # 構建新的記帳記錄
+                            record = {
+                                "name": expense_name.strip(),
+                                "date": expense_date.strftime("%Y-%m-%d"),
+                                "category": expense_category,
+                                "amount": expense_amount,
+                                "currency": expense_currency,
+                                "payer": payer,
+                                "splits": split_companions,
+                                "split_count": len(split_companions),
+                                "per_person_share": round(expense_amount / len(split_companions), 2),
+                                "timestamp": firestore.SERVER_TIMESTAMP # 使用 Firestore 服務器時間
+                            }
+                            
+                            # 寫入 Firestore
+                            if add_expense_record(db, record):
+                                # 成功寫入後，可以考慮清除表單狀態 (通常需要 Session State 重置或 Rerun)
+                                # 由於 Streamlit Form 會在 Submit 後清除輸入，這裡不需要額外操作
+                                pass 
+            
+            st.markdown("---")
+            st.markdown("### 🧾 已紀錄的消費 (待開發)")
+            st.info("此處將顯示所有歷史記帳記錄，並提供餘額結算報表。")
+
                 
         with tabs[4]: # 💬 助手 頁面 (Placeholder)
             st.header("即時翻譯與助手")
