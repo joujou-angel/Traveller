@@ -1,13 +1,13 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
 import time
 import os
-import requests # 新增：用於呼叫外部 API (如匯率)
+import requests 
 
 # --- Streamlit 頁面配置 ---
 st.set_page_config(
@@ -77,10 +77,6 @@ def get_all_expenses(db):
         st.session_state.expense_data = []
 
     try:
-        # 實時監聽 (on_snapshot)
-        # 注意：在 Streamlit 中，on_snapshot 需要在應用程式啟動時設定
-        # 這裡我們使用簡單的 get() 來確保每次 rerun 時資料是新的，以適應 Streamlit 的運行模式
-        
         # 讀取集合中的所有文件，按日期降序排列
         docs = db.collection('expense_records').order_by('date', direction=firestore.Query.DESCENDING).get()
         
@@ -113,28 +109,61 @@ def add_expense_record(db, record_data):
         st.error(f"❌ 記帳記錄寫入失敗：{e}")
         return False
 
+# --- 新增: 行程資料操作函式 ---
+
+def get_daily_itinerary(db, date_str):
+    """從 Firestore 讀取特定日期的行程記錄"""
+    if not db:
+        return []
+    try:
+        # 查詢特定日期的所有文件，並依照時間 (time) 排序
+        docs = db.collection('daily_itineraries').where('date', '==', date_str).order_by('time').get()
+        itinerary = []
+        for doc in docs:
+            record = doc.to_dict()
+            record['id'] = doc.id
+            itinerary.append(record)
+        return itinerary
+    except Exception as e:
+        st.error(f"❌ 讀取 {date_str} 行程失敗: {e}")
+        return []
+
+def add_itinerary_record(db, record_data):
+    """將新的行程記錄寫入 Firestore 的 daily_itineraries 集合中"""
+    if not db:
+        st.error("❌ 無法寫入行程記錄：Firebase 連線失敗。")
+        return False
+    try:
+        db.collection('daily_itineraries').add(record_data)
+        st.success("✅ 行程記錄已成功儲存！")
+        return True
+    except Exception as e:
+        st.error(f"❌ 行程記錄寫入失敗：{e}")
+        return False
+
+def delete_itinerary_record(db, doc_id):
+    """從 Firestore 刪除特定的行程記錄"""
+    if not db:
+        st.error("❌ 無法刪除行程記錄：Firebase 連線失敗。")
+        return False
+    try:
+        db.collection('daily_itineraries').document(doc_id).delete()
+        st.success("✅ 行程記錄已成功刪除！")
+        return True
+    except Exception as e:
+        st.error(f"❌ 行程記錄刪除失敗：{e}")
+        return False
+
 # --- 核心計算引擎 (Settlement Engine) ---
 def calculate_settlement(companions, expenses):
     """
     遍歷所有消費記錄，計算每個旅伴的總支付金額、總分攤金額和淨餘額。
-    
-    Args:
-        companions (list): 旅伴清單 (e.g., ['我', 'Alex', 'Jamie'])
-        expenses (list): 記帳記錄清單
-        
-    Returns:
-        tuple: (total_paid_all, settlement_summary)
-        其中 settlement_summary 是一個字典 {companion: {'paid': float, 'owed': float, 'net': float}}
     """
     # 初始化結算摘要
     settlement_summary = {comp: {'paid': 0.0, 'owed': 0.0, 'net': 0.0} for comp in companions}
     total_paid_all = 0.0
     
-    # [假設] 為了簡化計算，我們假設所有記帳金額都是 **KRW**，
-    # 並且我們只計算 **KRW** 的餘額。
-    
     for expense in expenses:
-        # 1. 計算總支付金額 (Paid)
         payer = expense.get('payer')
         amount = expense.get('amount', 0.0)
         
@@ -142,7 +171,6 @@ def calculate_settlement(companions, expenses):
             settlement_summary[payer]['paid'] += amount
             total_paid_all += amount
             
-        # 2. 計算總分攤金額 (Owed)
         splits = expense.get('splits', [])
         split_count = len(splits)
         
@@ -182,6 +210,57 @@ def get_exchange_rate(from_currency, to_currency):
     else:
         # 為了避免 API 金鑰問題，目前先固定回傳值
         return 1.0
+        
+# --- 新增: 計算行程日期範圍的函式 ---
+def calculate_trip_dates(flights):
+    """
+    根據航班資料計算整個旅程的日期範圍。
+    Args:
+        flights (list): 航班記錄清單，每個項目包含 'date' 欄位 (e.g., "2025-06-15")。
+    Returns:
+        list: 包含旅程所有日期的字串列表 (e.g., ["2025-06-15", "2025-06-16", ...])。
+    """
+    if not flights:
+        return [datetime.now().strftime("%Y-%m-%d")] # 預設今天
+
+    # 1. 提取所有有效的日期
+    date_strings = []
+    for flight in flights:
+        date_str = flight.get('date')
+        if date_str:
+            try:
+                date_strings.append(date_str)
+            except Exception:
+                continue
+
+    if not date_strings:
+        return [datetime.now().strftime("%Y-%m-%d")]
+
+    # 2. 將日期字串轉換為 datetime 物件
+    dates = []
+    for ds in date_strings:
+        try:
+            dates.append(datetime.strptime(ds, "%Y-%m-%d").date())
+        except ValueError:
+            # 處理可能存在的日期格式錯誤
+            continue
+            
+    if not dates:
+        return [datetime.now().strftime("%Y-%m-%d")]
+        
+    # 3. 找出最早和最晚的日期
+    start_date = min(dates)
+    end_date = max(dates)
+
+    # 4. 生成從開始到結束日期的所有日期列表
+    trip_dates = []
+    current_date = start_date
+    while current_date <= end_date:
+        trip_dates.append(current_date.strftime("%Y-%m-%d"))
+        current_date += timedelta(days=1)
+        
+    return trip_dates
+
 
 # --- 主要程式邏輯 ---
 if db:
@@ -198,6 +277,7 @@ if db:
         
         # 從 Firebase 獲取當前旅伴清單 - 預設為空列表 []
         current_companions = trip_data.get('companions', [])
+        current_flights = trip_data.get('flights', []) # 新增: 獲取航班資訊
         
         # --- 核心更新函式 ---
         def update_companions_in_firebase(new_list):
@@ -213,14 +293,13 @@ if db:
         tab_titles = ["📄 資訊", "🗺️ 行程", "☀️ 天氣", "💰 記帳", "💬 助手"]
         tabs = st.tabs(tab_titles)
 
-        # ... (tabs[0], tabs[1], tabs[2] 內容保持不變，略過以縮短檔案長度) ...
         # [START_TAB_0]
         with tabs[0]: # 📄 資訊 頁面 (使用 Firestore 資料)
             st.header("資訊總覽")
             
             # --- 航班資訊卡片 (整合編輯與顯示) ---
             flight_types = ["去程 (Outbound)", "回程 (Return)", "轉機 (Layover)"]
-            current_flights = trip_data.get('flights', [])
+            
 
             # 設置編輯狀態和暫存資料的 Session State
             if 'edit_flights' not in st.session_state:
@@ -269,7 +348,8 @@ if db:
                                 index=flight_types.index(flight.get('type', flight_types[0])) if flight.get('type') in flight_types else 0,
                                 key=f"type_{i}"
                             )
-                            flight['date'] = st.text_input("日期", value=flight.get("date", ""), key=f"date_{i}")
+                            # 設置為 text_input 方便使用者輸入 "YYYY-MM-DD" 格式
+                            flight['date'] = st.text_input("日期 (YYYY-MM-DD)", value=flight.get("date", ""), key=f"date_{i}")
                             flight['code'] = st.text_input("航班編號", value=flight.get("code", ""), key=f"code_{i}")
                             flight['pnr'] = st.text_input("訂位代碼", value=flight.get("pnr", ""), key=f"pnr_{i}")
                             
@@ -453,9 +533,141 @@ if db:
                              st.info("旅伴清單目前已清空。")
         # [END_TAB_0]
         
-        with tabs[1]: # 🗺️ 行程 頁面 (Placeholder)
-            st.header("行程細節")
-            st.info("此處將用於展示每日行程清單與地圖。")
+        with tabs[1]: # 🗺️ 行程 頁面 (核心重構)
+            st.header("每日行程細節")
+            
+            # --- 1. 計算日期範圍並設定 Session State ---
+            trip_dates = calculate_trip_dates(current_flights)
+            
+            if not trip_dates:
+                st.warning("請先在「資訊」頁面的航班資訊中設定去程及回程日期 (YYYY-MM-DD)，系統才能產生行程日期範圍。")
+                # 預設今天日期作為唯一選項
+                default_date = datetime.now().strftime("%Y-%m-%d")
+                trip_dates.append(default_date)
+            else:
+                default_date = trip_dates[0]
+            
+            if 'selected_itinerary_date' not in st.session_state:
+                st.session_state.selected_itinerary_date = default_date
+
+            # --- 2. 日期選擇介面 (模擬滑動/點擊) ---
+            st.markdown("### 📅 選擇日期")
+            
+            # 找到當前選中日期的索引
+            try:
+                current_index = trip_dates.index(st.session_state.selected_itinerary_date)
+            except ValueError:
+                current_index = 0
+                st.session_state.selected_itinerary_date = trip_dates[0] # 重設為有效日期
+                
+            col_prev, col_date_picker, col_next = st.columns([1, 4, 1])
+
+            with col_prev:
+                if current_index > 0 and st.button("⬅️ 前一天", key="prev_day_btn"):
+                    st.session_state.selected_itinerary_date = trip_dates[current_index - 1]
+                    st.rerun()
+
+            with col_date_picker:
+                # 使用 selectbox 作為主要的日期導航
+                st.session_state.selected_itinerary_date = st.selectbox(
+                    "選擇行程日期",
+                    options=trip_dates,
+                    index=current_index,
+                    key="date_selector",
+                    label_visibility="collapsed"
+                )
+                
+            with col_next:
+                if current_index < len(trip_dates) - 1 and st.button("後一天 ➡️", key="next_day_btn"):
+                    st.session_state.selected_itinerary_date = trip_dates[current_index + 1]
+                    st.rerun()
+
+            selected_date = st.session_state.selected_itinerary_date
+            st.markdown(f"### {selected_date} 行程")
+            st.markdown("---")
+
+            # --- 3. 讀取並顯示當日行程 ---
+            daily_itinerary = get_daily_itinerary(db, selected_date)
+            
+            if not daily_itinerary:
+                st.info("當日行程尚無記錄。請使用下方表單新增行程。")
+            else:
+                # 顯示行程清單
+                for item in daily_itinerary:
+                    
+                    # 構造 Google Maps 連結，用於點擊展開
+                    # URL 編碼地址，確保在 URL 中安全傳輸
+                    address_encoded = requests.utils.quote(item.get('address', ''))
+                    map_link = f"https://www.google.com/maps/search/?api=1&query={address_encoded}"
+                    
+                    with st.container(border=True):
+                        col_time, col_details, col_action = st.columns([1, 4, 1])
+
+                        with col_time:
+                            st.markdown(f"## **{item.get('time', 'N/A')}**")
+                            
+                        with col_details:
+                            st.markdown(f"#### **{item.get('location_name', '未知地點')}**")
+                            # 點擊地址即可開啟 Google Map
+                            st.markdown(f"""
+                                <a href="{map_link}" target="_blank" style="text-decoration: none; color: #1E40AF; font-weight: bold;">
+                                    📍 {item.get('address', 'N/A')}
+                                </a>
+                            """, unsafe_allow_html=True)
+                            st.markdown(f"📞 {item.get('phone', 'N/A')}")
+                            st.markdown(f"*{item.get('notes', '')}*")
+                            
+                        with col_action:
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            # 刪除按鈕
+                            if st.button("🗑️ 刪除", key=f"del_{item['id']}"):
+                                delete_itinerary_record(db, item['id'])
+                                st.rerun()
+
+            st.markdown("---")
+
+            # --- 4. 新增行程表單 ---
+            st.markdown("### ➕ 新增行程項目")
+            with st.form(key="add_itinerary_form"):
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    location_name = st.text_input("地名/活動名稱", key="it_name")
+                    time_str = st.text_input("時間 (HH:MM)", placeholder="例如: 09:30 或 20:00", key="it_time")
+                    address = st.text_input("地址", placeholder="準確的地址，有利於地圖連結", key="it_addr")
+                
+                with col2:
+                    phone = st.text_input("電話號碼", key="it_phone")
+                    category = st.selectbox("分類", options=["景點", "餐飲", "交通", "購物", "住宿", "其他"], key="it_category")
+                    notes = st.text_area("備註", key="it_notes")
+                
+                submitted = st.form_submit_button("✅ 儲存這筆行程")
+                
+                if submitted:
+                    # 簡單的時間格式驗證 (確保能排序)
+                    if not time_str or not location_name or not address:
+                        st.error("地名、時間和地址為必填欄位。")
+                    else:
+                        try:
+                            # 嘗試將時間轉換為 datetime.time 進行排序驗證
+                            datetime.strptime(time_str, "%H:%M") 
+                            
+                            record = {
+                                "date": selected_date,
+                                "time": time_str, # 格式 HH:MM
+                                "location_name": location_name.strip(),
+                                "address": address.strip(),
+                                "phone": phone.strip(),
+                                "category": category,
+                                "notes": notes.strip(),
+                                "timestamp": firestore.SERVER_TIMESTAMP 
+                            }
+                            
+                            if add_itinerary_record(db, record):
+                                st.rerun()
+                        except ValueError:
+                            st.error("時間格式錯誤。請使用 HH:MM (例如 09:30) 格式。")
 
         with tabs[2]: # ☀️ 天氣 頁面 (Placeholder)
             st.header("首爾即時天氣")
