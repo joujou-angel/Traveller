@@ -111,41 +111,99 @@ if db:
             
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # --- 住宿資訊卡片 ---
-            hotel = trip_data.get('hotel', {})
-            st.markdown("""
-                <div style='padding: 15px; border-radius: 10px; border: 1px solid #F5D0A9; background-color: #FEF3E6; margin-bottom: 20px;'>
-                <h3 style='margin: 0; padding-bottom: 10px; color: #9A3412;'>🏨 住宿資訊</h3>
-            """, unsafe_allow_html=True)
-            
-            st.subheader(f"**{hotel.get('name', '未設定飯店名稱')}**")
-            
-            col_addr, col_ref = st.columns(2)
-            
-            with col_addr:
-                st.markdown(f"**英文地址:** {hotel.get('eng_addr', 'N/A')}")
-                st.markdown(f"**韓文地址:** {hotel.get('kor_addr', 'N/A')}")
-            
-            with col_ref:
-                st.markdown(f"**訂位代碼:** `{hotel.get('booking_ref', 'N/A')}`")
-                st.markdown(f"**電話:** {hotel.get('phone', 'N/A')}")
 
-            col_time_in, col_time_out = st.columns(2)
-            with col_time_in:
-                st.markdown(f"**入住:** {hotel.get('check_in', 'N/A')}")
-            with col_time_out:
-                st.markdown(f"**退房:** {hotel.get('check_out', 'N/A')}")
+# --- 住宿資訊卡片 (整合編輯與顯示) ---
+
+# 確保 master_info_data 已經在前面被成功讀取 (db 連線成功)
+if db and master_info_data:
+    master_info_ref = db.collection("trip_data").document("master_info")
+    current_hotel = master_info_data.get("hotel", {})
+    
+    # --- [整合舊版功能] 客製化 HTML 樣式和標題 ---
+    st.markdown("""
+    <div style='padding: 15px; border-radius: 10px; border: 1px solid #F5D0A9; background-color: #FEF3E6; margin-bottom: 20px;'>
+    <h3 style='margin: 0; padding-bottom: 10px; color: #9A3412;'>🏨 住宿資訊</h3>
+    """, unsafe_allow_html=True)
+    
+    # 設置編輯狀態的 Session State
+    if 'edit_hotel' not in st.session_state:
+        st.session_state.edit_hotel = False
+        
+    # 編輯/取消編輯按鈕
+    if st.button("✏️ 編輯住宿資訊", key="edit_toggle"):
+        st.session_state.edit_hotel = not st.session_state.edit_hotel
+        
+    # --- 編輯表單 (只有在編輯狀態下顯示) ---
+    if st.session_state.edit_hotel:
+        with st.form(key='hotel_edit_form'):
+            st.markdown("##### 📝 編輯表單 - 同步寫回 Firebase")
+            
+            # 使用 current_hotel 中的現有資料作為預設值
+            name = st.text_input("飯店名稱", value=current_hotel.get("name", ""))
+            kor_addr = st.text_area("韓文地址", value=current_hotel.get("kor_addr", ""))
+            eng_addr = st.text_area("英文地址", value=current_hotel.get("eng_addr", ""))
+            booking_ref = st.text_input("訂位代碼", value=current_hotel.get("booking_ref", ""))
+            phone = st.text_input("電話號碼", value=current_hotel.get("phone", ""))
+            check_in = st.text_input("入住時間 (e.g. 15:00)", value=current_hotel.get("check_in", "15:00"))
+            check_out = st.text_input("退房時間 (e.g. 11:00)", value=current_hotel.get("check_out", "11:00"))
+
+            submitted = st.form_submit_button("✅ 確認儲存並更新 Firebase")
+
+            if submitted:
+                # 構建新的 hotel 資料 Map
+                new_hotel_data = {
+                    "name": name,
+                    "kor_addr": kor_addr,
+                    "eng_addr": eng_addr,
+                    "booking_ref": booking_ref,
+                    "phone": phone,
+                    "check_in": check_in,
+                    "check_out": check_out,
+                    "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S") 
+                }
                 
-            # --- 給司機看 按鈕功能 ---
-            if st.button("🚖 給司機看 (放大地址)"):
-                st.code(f"""
-                [請向司機出示]
-                飯店名稱: {hotel.get('name', 'N/A')}
-                韓文地址: {hotel.get('kor_addr', 'N/A')}
-                電話: {hotel.get('phone', 'N/A')}
-                """, language='text')
+                try:
+                    # 執行 Firestore 更新操作 (核心的寫入操作)
+                    master_info_ref.update({"hotel": new_hotel_data})
+                    st.success("✅ 住宿資訊已成功更新並同步至 Firebase！")
+                    st.session_state.edit_hotel = False 
+                    st.rerun() 
+                except Exception as e:
+                    st.error(f"❌ 資料寫入失敗。錯誤代碼: {e}")
+    
+    # --- 住宿資訊顯示 (非編輯狀態) ---
+    if not st.session_state.edit_hotel:
+        st.subheader(f"**{current_hotel.get('name', '未設定飯店名稱')}**")
+        
+        col_addr, col_ref = st.columns(2)
+        with col_addr:
+            st.markdown(f"**英文地址:** {current_hotel.get('eng_addr', 'N/A')}")
+            st.markdown(f"**韓文地址:** {current_hotel.get('kor_addr', 'N/A')}")
+        
+        with col_ref:
+            st.markdown(f"**訂位代碼:** `{current_hotel.get('booking_ref', 'N/A')}`")
+            st.markdown(f"**電話:** {current_hotel.get('phone', 'N/A')}")
 
-            st.markdown("</div>", unsafe_allow_html=True)
+        col_time_in, col_time_out = st.columns(2)
+        with col_time_in:
+            st.markdown(f"**入住:** {current_hotel.get('check_in', 'N/A')}")
+        with col_time_out:
+            st.markdown(f"**退房:** {current_hotel.get('check_out', 'N/A')}")
+            
+        # --- [整合舊版功能] 給司機看 按鈕功能 ---
+        if st.button("🚖 給司機看 (放大地址)", key="driver_button"):
+            st.code(f"""
+[請向司機出示]
+飯店名稱: {current_hotel.get('name', 'N/A')}
+韓文地址: {current_hotel.get('kor_addr', 'N/A')}
+電話: {current_hotel.get('phone', 'N/A')}
+""", language='text')
+
+        updated_time = current_hotel.get('last_updated', '尚未紀錄')
+        st.caption(f"數據新鮮度指標：最後更新於 {updated_time}")
+
+# --- [整合舊版功能] HTML 結尾 ---
+st.markdown("</div>", unsafe_allow_html=True)
 
             # --- 旅伴管理區塊 (暫時保持 Session State，未來升級至 Firebase) ---
             with st.expander("👥 旅伴管理 (用於記帳分攤)", expanded=True):
