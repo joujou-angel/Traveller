@@ -77,11 +77,20 @@ if db:
         # 設置標題和基本資訊
         st.markdown("## 旅遊筆記本")
         st.markdown(f"我的旅行 ({datetime.now().year}/{datetime.now().month}) | **數據源：Firebase**")
-
-        # 初始化 Session State (旅伴管理)
-        if 'companions' not in st.session_state:
-            st.session_state.companions = trip_data.get('companions', ["自己"])
         
+        # 從 Firebase 獲取當前旅伴清單
+        current_companions = trip_data.get('companions', ["自己"])
+        
+        # --- 核心更新函式 ---
+        def update_companions_in_firebase(new_list):
+            try:
+                # 執行 Firestore 更新
+                master_info_ref.update({"companions": new_list})
+                st.success("✅ 旅伴清單已成功更新並同步至 Firebase！")
+                st.rerun() # 重新執行以載入最新資料
+            except Exception as e:
+                st.error(f"❌ 旅伴清單寫入失敗。錯誤代碼: {e}")
+
         # --- 分頁導航 ---
         tab_titles = ["📄 資訊", "🗺️ 行程", "☀️ 天氣", "💰 記帳", "💬 助手"]
         tabs = st.tabs(tab_titles)
@@ -289,27 +298,34 @@ if db:
             # --- [整合舊版功能] HTML 結尾 ---
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # --- 旅伴管理區塊 (暫時保持 Session State，未來升級至 Firebase) ---
+            # --- 旅伴管理區塊 (升級至 Firebase 永久化) ---
             with st.expander("👥 旅伴管理 (用於記帳分攤)", expanded=True):
                 st.markdown("目前的旅伴清單:")
-                st.markdown(f"**{', '.join(st.session_state.companions)}**")
+                st.markdown(f"**{', '.join(current_companions)}**")
                 
                 new_companion = st.text_input("新增旅伴暱稱", key="new_comp")
                 
                 col_add, col_clear = st.columns(2)
                 
                 with col_add:
-                    if st.button("➕ 新增旅伴"):
-                        if new_companion and new_companion not in st.session_state.companions:
-                            st.session_state.companions.append(new_companion)
-                            st.rerun()
+                    if st.button("➕ 新增旅伴", key="add_comp_btn"):
+                        if new_companion and new_companion not in current_companions:
+                            if new_companion == "自己":
+                                st.warning("「自己」已是預設旅伴，不需重複新增。")
+                            else:
+                                new_list = current_companions + [new_companion]
+                                update_companions_in_firebase(new_list)
+                        elif new_companion:
+                             st.warning(f"旅伴 '{new_companion}' 已存在於清單中。")
+                        else:
+                            st.warning("請輸入旅伴暱稱。")
                 
                 with col_clear:
-                    if st.button("🗑️ 清空旅伴清單"):
-                        st.session_state.companions = ["自己"]
-                        st.rerun()
-            
-            # 以下是分頁內容，都在 if trip_data: 區塊內
+                    if st.button("🗑️ 清空旅伴清單", key="clear_comp_btn"):
+                        if current_companions != ["自己"]:
+                            update_companions_in_firebase(["自己"])
+                        else:
+                             st.info("旅伴清單已經是預設的「自己」。")
             
         with tabs[1]: # 🗺️ 行程 頁面 (Placeholder)
             st.header("行程細節")
@@ -322,9 +338,10 @@ if db:
         with tabs[3]: # 💰 記帳 頁面 (Placeholder)
             st.header("協作記帳本")
             st.warning("💡 記帳功能將在下一步利用 Firebase 的寫入功能實現持久化。")
-            if st.session_state.companions:
+            if current_companions:
                 st.subheader("旅伴分攤參考")
-                st.write(f"可分攤的旅伴: {', '.join(st.session_state.companions)}")
+                # 此處直接使用從 Firebase 讀取的 current_companions
+                st.write(f"可分攤的旅伴: {', '.join(current_companions)}")
                 
         with tabs[4]: # 💬 助手 頁面 (Placeholder)
             st.header("即時翻譯與助手")
