@@ -13,7 +13,7 @@ HOTEL_INFO = "樂天酒店 (Lotte Hotel Seoul)"
 TRIP_DAYS = (datetime(2025, 11, 27) - datetime.now()).days
 CURRENCY_CODE = "KRW"
 
-sst.set_page_config(
+st.set_page_config(
     layout="wide", 
     page_title="🇰🇷 首爾行動指揮中心", 
     page_icon="[https://drive.google.com/file/d/1E_lZCsdpqHNWbPzJW77GzYaJNaCdRfhh/view?usp=sharing]" # <--- 這裡是要修改的部分
