@@ -12,7 +12,609 @@ import requests
 # --- Streamlit 頁面配置 ---
 st.set_page_config(
     layout="wide", 
-    page_title="🇰🇷 首爾旅遊筆記本 (Firebase 連線中)",
+    page_title="🇰🇷 首爾旅遊筆記本 (Firebase 連線中)",import streamlit as st
+import pandas as pd
+from datetime import datetime
+import json
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
+import time
+import os
+import requests # 用於呼叫外部 API (如匯率)
+
+# --- Streamlit 頁面配置 ---
+st.set_page_config(
+    layout="wide", 
+    page_title="🇰🇷 首爾旅遊筆記本 (核心穩定版)",
+    page_icon="✈️"
+)
+
+# --- Firebase 連線與初始化 ---
+def initialize_firestore():
+    """使用服務帳戶檔案來初始化 Firebase"""
+    
+    key_file_path = "firebase_key.json" 
+    
+    try:
+        if not os.path.exists(key_file_path):
+            return None
+
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(key_file_path)
+            firebase_admin.initialize_app(cred)
+            
+        return firestore.client()
+        
+    except Exception as e:
+        # st.error(f"❌ Firebase 連線失敗 (檔案模式)。請檢查 '{key_file_path}' 檔案內容是否完整無損：{e}")
+        return None
+
+# 初始化連線
+db = initialize_firestore() 
+
+# --- 資料讀取函式 ---
+def load_trip_data(db):
+    """從 Firestore 讀取行程主要資料"""
+    if not db:
+        return None
+    try:
+        doc_ref = db.collection('trip_data').document('master_info')
+        doc = doc_ref.get()
+        
+        if doc.exists:
+            data = doc.to_dict()
+            return data
+        else:
+            return None
+    except Exception as e:
+        st.error(f"❌ 讀取資料失敗：{e}")
+        return None
+
+# --- 記帳資料讀取/監聽函式 ---
+def get_all_expenses(db):
+    """從 Firestore 實時監聽 expense_records 集合"""
+    if not db:
+        return []
+        
+    if 'expense_data' not in st.session_state:
+        st.session_state.expense_data = []
+
+    try:
+        # 讀取集合中的所有文件，按日期降序排列
+        # 注意：此處已採用 Python 端排序 (memory-sort) 來避免 Firestore 複合索引錯誤
+        docs = db.collection('expense_records').order_by('date', direction=firestore.Query.DESCENDING).get()
+        
+        expense_list = []
+        for doc in docs:
+            record = doc.to_dict()
+            record['id'] = doc.id 
+            expense_list.append(record)
+        
+        st.session_state.expense_data = expense_list
+        return expense_list
+
+    except Exception as e:
+        st.error(f"❌ 讀取記帳記錄失敗：{e}")
+        return []
+
+# --- 記帳資料寫入函式 ---
+def add_expense_record(db, record_data):
+    """將新的記帳記錄寫入 Firestore 的 expense_records 集合中"""
+    if not db:
+        st.error("❌ 無法寫入記帳記錄：Firebase 連線失敗。")
+        return False
+    try:
+        db.collection('expense_records').add(record_data)
+        st.success("✅ 記帳記錄已成功儲存！")
+        return True
+    except Exception as e:
+        st.error(f"❌ 記帳記錄寫入失敗：{e}")
+        return False
+
+# --- 核心計算引擎 (Settlement Engine) ---
+def calculate_settlement(companions, expenses):
+    """
+    遍歷所有消費記錄，計算每個旅伴的總支付金額、總分攤金額和淨餘額。
+    """
+    settlement_summary = {comp: {'paid': 0.0, 'owed': 0.0, 'net': 0.0} for comp in companions}
+    total_paid_all = 0.0
+    
+    for expense in expenses:
+        # 1. 計算總支付金額 (Paid)
+        payer = expense.get('payer')
+        amount = expense.get('amount', 0.0)
+        
+        if payer in settlement_summary:
+            settlement_summary[payer]['paid'] += amount
+            total_paid_all += amount
+            
+        # 2. 計算總分攤金額 (Owed)
+        splits = expense.get('splits', [])
+        split_count = len(splits)
+        
+        if split_count > 0:
+            share_per_person = amount / split_count
+            
+            for comp in splits:
+                if comp in settlement_summary:
+                    settlement_summary[comp]['owed'] += share_per_person
+    
+    # 3. 計算淨餘額 (Net Balance)
+    for comp in companions:
+        summary = settlement_summary[comp]
+        # 淨餘額 = 已付 - 應付
+        summary['net'] = summary['paid'] - summary['owed']
+        
+        summary['paid'] = round(summary['paid'], 2)
+        summary['owed'] = round(summary['owed'], 2)
+        summary['net'] = round(summary['net'], 2)
+        
+    return total_paid_all, settlement_summary
+
+# --- 匯率計算框架 (使用固定值) ---
+@st.cache_data(ttl=3600) # 快取 1 小時
+def get_exchange_rate(from_currency, to_currency):
+    """
+    目前使用固定值作為演示。
+    """
+    if from_currency == "TWD" and to_currency == "KRW":
+        return 40.0
+    elif from_currency == "KRW" and to_currency == "TWD":
+        return 0.025
+    else:
+        return 1.0
+
+# --- 主要程式邏輯 ---
+if db:
+    # 執行資料讀取
+    trip_data = load_trip_data(db)
+    
+    master_info_ref = db.collection('trip_data').document('master_info')
+    
+    if trip_data:
+        # 設置標題和基本資訊
+        st.markdown("## 旅遊筆記本")
+        st.markdown(f"核心功能模式 | **數據源：Firebase**")
+        
+        current_companions = trip_data.get('companions', [])
+        
+        # --- 核心更新函式 ---
+        def update_companions_in_firebase(new_list):
+            try:
+                master_info_ref.update({"companions": new_list})
+                st.success("✅ 旅伴清單已成功更新並同步至 Firebase！")
+                st.rerun() 
+            except Exception as e:
+                st.error(f"❌ 旅伴清單寫入失敗。錯誤代碼: {e}")
+
+        # --- 分頁導航 (精簡至核心功能) ---
+        tab_titles = ["📄 資訊總覽", "💰 協作記帳"]
+        tabs = st.tabs(tab_titles)
+
+        # [START_TAB_0] - 資訊總覽
+        with tabs[0]: 
+            st.header("資訊總覽")
+            
+            # --- 航班資訊卡片 (整合編輯與顯示) ---
+            flight_types = ["去程 (Outbound)", "回程 (Return)", "轉機 (Layover)"]
+            current_flights = trip_data.get('flights', [])
+
+            if 'edit_flights' not in st.session_state:
+                st.session_state.edit_flights = False
+            if 'flights_temp' not in st.session_state or not st.session_state.edit_flights:
+                st.session_state.flights_temp = current_flights[:]
+
+            st.markdown("""
+                <div style='padding: 15px; border-radius: 10px; border: 1px solid #C4D7ED; background-color: #E6EFFD; margin-bottom: 20px;'>
+                <h3 style='margin: 0; padding-bottom: 10px; color: #1E40AF;'>✈️ 航班資訊</h3>
+            """, unsafe_allow_html=True)
+
+            if st.button("✏️ 編輯/新增航班資訊", key="edit_flights_toggle"):
+                st.session_state.edit_flights = not st.session_state.edit_flights
+                st.session_state.flights_temp = current_flights[:] 
+                st.rerun()
+
+            if st.session_state.edit_flights:
+                
+                if st.button("➕ 點擊新增一筆航班", key="add_flight_btn"):
+                    st.session_state.flights_temp.append({
+                        "type": flight_types[0], "date": "", "code": "", "pnr": "", 
+                        "terminal": "", "from": "", "dep": "", "to": "", "arr": ""
+                    })
+                    st.rerun() 
+                    
+                with st.form(key='flights_edit_form'):
+                    st.markdown("##### 📝 航班編輯表單 - 同步寫回 Firebase")
+                    st.markdown("---")
+                    
+                    for i, flight in enumerate(st.session_state.flights_temp):
+                        st.markdown(f"#### 航班 #{i + 1} - {flight.get('type', '單程')}")
+                        
+                        cols = st.columns([2, 2, 1])
+
+                        with cols[0]:
+                            flight['type'] = st.selectbox("類型", options=flight_types, 
+                                index=flight_types.index(flight.get('type', flight_types[0])) if flight.get('type') in flight_types else 0,
+                                key=f"type_{i}"
+                            )
+                            flight['date'] = st.text_input("日期", value=flight.get("date", ""), key=f"date_{i}")
+                            flight['code'] = st.text_input("航班編號", value=flight.get("code", ""), key=f"code_{i}")
+                            flight['pnr'] = st.text_input("訂位代碼", value=flight.get("pnr", ""), key=f"pnr_{i}")
+                            
+                        with cols[1]:
+                            flight['from'] = st.text_input("出發地 (e.g. TPE)", value=flight.get("from", ""), key=f"from_{i}")
+                            flight['dep'] = st.text_input("預計起飛 (HH:MM)", value=flight.get("dep", ""), key=f"dep_{i}")
+                            flight['to'] = st.text_input("目的地 (e.g. ICN)", value=flight.get("to", ""), key=f"to_{i}")
+                            flight['arr'] = st.text_input("預計抵達 (HH:MM)", value=flight.get("arr", ""), key=f"arr_{i}")
+                            flight['terminal'] = st.text_input("航廈資訊", value=flight.get("terminal", ""), key=f"terminal_{i}")
+
+                        with cols[2]:
+                            st.markdown("<br>"*5, unsafe_allow_html=True)
+                            if st.form_submit_button(f"❌ 刪除航班 #{i + 1}", help="點擊此按鈕將移除此航班並重新整理表單", key=f"delete_in_form_{i}"):
+                                st.session_state.flights_temp.pop(i) 
+                                st.session_state.edit_flights = True 
+                                st.rerun() 
+                        
+                        st.markdown("---")
+                        
+                    submitted = st.form_submit_button("✅ 確認儲存所有航班更新至 Firebase")
+
+                    if submitted:
+                        final_flights = st.session_state.flights_temp
+                        
+                        try:
+                            master_info_ref.update({"flights": final_flights})
+                            st.success("✅ 航班資訊已成功更新並同步至 Firebase！")
+                            st.session_state.edit_flights = False
+                            del st.session_state.flights_temp 
+                            st.rerun() 
+                        except Exception as e:
+                            st.error(f"❌ 資料寫入失敗。錯誤代碼: {e}")
+                            
+            if not st.session_state.edit_flights:
+                flights_to_display = current_flights
+                if not flights_to_display:
+                    st.info("目前尚未設定任何航班資訊。請點擊 '編輯/新增航班資訊' 按鈕進行新增。")
+                
+                for flight in flights_to_display:
+                    with st.container(border=True):
+                        col_type, col_info, col_time = st.columns([1, 2, 2])
+                        
+                        with col_type:
+                            st.markdown(f"**{flight.get('type', '單程')}航班**")
+                            st.markdown(f"**{flight.get('code', 'N/A')}**")
+
+                        with col_info:
+                            st.markdown(f"**日期:** {flight.get('date', 'N/A')}")
+                            st.markdown(f"**訂位代碼:** `{flight.get('pnr', 'N/A')}`")
+                            st.markdown(f"**航廈:** {flight.get('terminal', 'N/A')}")
+                            
+                        with col_time:
+                            st.markdown(f"**{flight.get('from', 'N/A')} ({flight.get('dep', 'N/A')}) → {flight.get('to', 'N/A')} ({flight.get('arr', 'N/A')})**")
+                        
+            st.markdown("</div>", unsafe_allow_html=True)
+
+
+            # --- 住宿資訊卡片 (整合編輯與顯示) ---
+            current_hotel = trip_data.get("hotel", {})
+            
+            st.markdown("""
+            <div style='padding: 15px; border-radius: 10px; border: 1px solid #F5D0A9; background-color: #FEF3E6; margin-bottom: 20px;'>
+            <h3 style='margin: 0; padding-bottom: 10px; color: #9A3412;'>🏨 住宿資訊</h3>
+            """, unsafe_allow_html=True)
+            
+            if 'edit_hotel' not in st.session_state:
+                st.session_state.edit_hotel = False
+                
+            if st.button("✏️ 編輯住宿資訊", key="edit_toggle"):
+                st.session_state.edit_hotel = not st.session_state.edit_hotel
+                
+            if st.session_state.edit_hotel:
+                with st.form(key='hotel_edit_form'):
+                    st.markdown("##### 📝 編輯表單 - 同步寫回 Firebase")
+                    
+                    name = st.text_input("飯店名稱", value=current_hotel.get("name", ""))
+                    kor_addr = st.text_area("韓文地址", value=current_hotel.get("kor_addr", ""))
+                    eng_addr = st.text_area("英文地址", value=current_hotel.get("eng_addr", ""))
+                    booking_ref = st.text_input("訂位代碼", value=current_hotel.get("booking_ref", ""))
+                    phone = st.text_input("電話號碼", value=current_hotel.get("phone", ""))
+                    check_in = st.text_input("入住時間 (e.g. 15:00)", value=current_hotel.get("check_in", "15:00"))
+                    check_out = st.text_input("退房時間 (e.g. 11:00)", value=current_hotel.get("check_out", "11:00"))
+
+                    submitted = st.form_submit_button("✅ 確認儲存並更新 Firebase")
+
+                    if submitted:
+                        new_hotel_data = {
+                            "name": name,
+                            "kor_addr": kor_addr,
+                            "eng_addr": eng_addr,
+                            "booking_ref": booking_ref,
+                            "phone": phone,
+                            "check_in": check_in,
+                            "check_out": check_out,
+                            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S") 
+                        }
+                        
+                        try:
+                            master_info_ref.update({"hotel": new_hotel_data})
+                            st.success("✅ 住宿資訊已成功更新並同步至 Firebase！")
+                            st.session_state.edit_hotel = False 
+                            st.rerun() 
+                        except Exception as e:
+                            st.error(f"❌ 資料寫入失敗。錯誤代碼: {e}")
+            
+            if not st.session_state.edit_hotel:
+                st.subheader(f"**{current_hotel.get('name', '未設定飯店名稱')}**")
+                
+                col_addr, col_ref = st.columns(2)
+                with col_addr:
+                    st.markdown(f"**英文地址:** {current_hotel.get('eng_addr', 'N/A')}")
+                    st.markdown(f"**韓文地址:** {current_hotel.get('kor_addr', 'N/A')}")
+                
+                with col_ref:
+                    st.markdown(f"**訂位代碼:** `{current_hotel.get('booking_ref', 'N/A')}`")
+                    st.markdown(f"**電話:** {current_hotel.get('phone', 'N/A')}")
+
+                col_time_in, col_time_out = st.columns(2)
+                with col_time_in:
+                    st.markdown(f"**入住:** {current_hotel.get('check_in', 'N/A')}")
+                with col_time_out:
+                    st.markdown(f"**退房:** {current_hotel.get('check_out', 'N/A')}")
+                    
+                if st.button("🚖 給司機看 (放大地址)", key="driver_button"):
+                    st.code(f"""
+[請向司機出示]
+飯店名稱: {current_hotel.get('name', 'N/A')}
+韓文地址: {current_hotel.get('kor_addr', 'N/A')}
+電話: {current_hotel.get('phone', 'N/A')}
+""", language='text')
+
+                updated_time = current_hotel.get('last_updated', '尚未紀錄')
+                st.caption(f"數據新鮮度指標：最後更新於 {updated_time}")
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            # --- 旅伴管理區塊 ---
+            with st.expander("👥 旅伴管理 (用於記帳分攤)", expanded=True):
+                st.markdown("目前的旅伴清單:")
+                if current_companions:
+                    st.markdown(f"**{', '.join(current_companions)}**")
+                else:
+                    st.info("目前旅伴清單為空。請新增您的暱稱和其他旅伴。")
+                
+                new_companion = st.text_input("新增旅伴暱稱", key="new_comp")
+                
+                col_add, col_clear = st.columns(2)
+                
+                with col_add:
+                    if st.button("➕ 新增旅伴", key="add_comp_btn"):
+                        if new_companion and new_companion not in current_companions:
+                            new_list = current_companions + [new_companion]
+                            st.session_state.new_comp = "" 
+                            update_companions_in_firebase(new_list)
+                        elif new_companion:
+                             st.warning(f"旅伴 '{new_companion}' 已存在於清單中。")
+                        else:
+                            st.warning("請輸入旅伴暱稱。")
+                
+                with col_clear:
+                    if st.button("🗑️ 清空旅伴清單", key="clear_comp_btn"):
+                        if current_companions:
+                            update_companions_in_firebase([])
+                        else:
+                             st.info("旅伴清單目前已清空。")
+        # [END_TAB_0]
+        
+        # [START_TAB_1] - 協作記帳 (原來的 Tab 3)
+        with tabs[1]: 
+            st.header("協作記帳本")
+            
+            # --- 0. 讀取所有記帳記錄 ---
+            expense_records = get_all_expenses(db)
+            
+            # --- 1. 簡易匯率計算機 ---
+            st.markdown("### 💱 簡易匯率換算 (KRW/TWD)")
+            
+            col_from_currency, col_from_amount, col_equal, col_to_currency, col_to_amount = st.columns([1, 2, 0.5, 1, 2])
+            
+            with col_from_currency:
+                from_currency = st.selectbox("從", options=["KRW", "TWD", "USD"], index=0, key="from_cur")
+            with col_from_amount:
+                from_amount = st.number_input("金額", min_value=0.0, value=10000.0, step=100.0, key="from_amt")
+            with col_equal:
+                st.markdown("### =")
+            with col_to_currency:
+                to_currency = st.selectbox("換算為", options=["TWD", "KRW", "USD"], index=0, key="to_cur")
+
+            rate = get_exchange_rate(from_currency, to_currency)
+            to_amount = from_amount * rate
+            
+            with col_to_amount:
+                st.text_input("約為", value=f"{to_amount:,.2f}", disabled=True, key="to_amt_display")
+            
+            st.info(f"當前匯率: 1 {from_currency} 約等於 {rate:.4f} {to_currency} (目前為固定演示值)。")
+            st.markdown("---")
+            
+            # --- 2. 記帳輸入表單 ---
+            st.markdown("### 📝 新增一筆消費記錄")
+            
+            if not current_companions:
+                st.warning("請先在「資訊總覽」頁面新增旅伴暱稱，才能進行記帳與分攤設定。")
+            else:
+                with st.form(key="expense_form"):
+                    expense_name = st.text_input("消費項目", placeholder="例如：晚餐、計程車、景點門票", key="exp_name")
+                    
+                    col_date, col_category = st.columns(2)
+                    with col_date:
+                        expense_date = st.date_input("消費日期", value="today", key="exp_date")
+                    with col_category:
+                        categories = ["餐飲", "交通", "住宿", "門票/活動", "購物", "其他"]
+                        expense_category = st.selectbox("分類", options=categories, key="exp_category")
+
+                    col_amount, col_currency = st.columns(2)
+                    with col_amount:
+                        expense_amount = st.number_input("金額", min_value=1.0, value=10000.0, step=100.0, format="%.2f", key="exp_amount")
+                    with col_currency:
+                        expense_currency = st.selectbox("幣別 (目前結算僅支持 KRW)", options=["KRW", "TWD", "USD"], index=0, key="exp_currency")
+
+                    st.markdown("#### 誰先付的 (Payer)?")
+                    payer = st.radio(
+                        "選擇付費者",
+                        options=current_companions,
+                        index=0, 
+                        key="exp_payer",
+                        horizontal=True
+                    )
+
+                    st.markdown("#### 有誰要分攤這筆金額 (Splits)?")
+                    split_companions = st.multiselect(
+                        "選擇分攤者",
+                        options=current_companions,
+                        default=current_companions,
+                        key="exp_splits"
+                    )
+
+                    submitted = st.form_submit_button("✅ 儲存這筆帳目")
+
+                    if submitted:
+                        if not expense_name.strip():
+                            st.error("請輸入消費項目名稱。")
+                        elif not split_companions:
+                            st.error("請至少選擇一位分攤者。")
+                        else:
+                            record = {
+                                "name": expense_name.strip(),
+                                "date": expense_date.strftime("%Y-%m-%d"),
+                                "category": expense_category,
+                                "amount": expense_amount,
+                                "currency": expense_currency,
+                                "payer": payer,
+                                "splits": split_companions,
+                                "split_count": len(split_companions),
+                                "per_person_share": round(expense_amount / len(split_companions), 2), 
+                                "timestamp": firestore.SERVER_TIMESTAMP 
+                            }
+                            
+                            if add_expense_record(db, record):
+                                st.rerun()
+            
+            st.markdown("---")
+            
+            # --- 3. 結算概況 ---
+            st.markdown("### 📊 結算概況 (幣別：KRW)")
+            
+            if not expense_records:
+                st.info("目前尚無消費記錄可供結算。")
+            else:
+                total_paid_all, settlement_summary = calculate_settlement(current_companions, expense_records)
+                
+                st.metric("總支出", f"{total_paid_all:,.2f} KRW", delta_color="off")
+                
+                for companion, summary in settlement_summary.items():
+                    net_balance = summary['net']
+                    
+                    if net_balance > 0:
+                        status_label = "收回"
+                        status_amount = f"+{net_balance:,.0f} KRW"
+                        color_class = "green"
+                    elif net_balance < 0:
+                        status_label = "支付"
+                        status_amount = f"{abs(net_balance):,.0f} KRW"
+                        color_class = "red"
+                    else:
+                        status_label = "平衡"
+                        status_amount = "0 KRW"
+                        color_class = "blue"
+
+                    st.markdown(f"""
+                        <div style="
+                            padding: 15px; 
+                            margin-bottom: 10px; 
+                            border: 1px solid #ddd; 
+                            border-left: 5px solid {'#10B981' if color_class == 'green' else '#EF4444' if color_class == 'red' else '#3B82F6'}; 
+                            border-radius: 8px;
+                            display: flex;
+                            align-items: center;
+                        ">
+                            <span style="
+                                font-size: 24px; 
+                                font-weight: bold; 
+                                color: white; 
+                                background-color: {'#10B981' if color_class == 'green' else '#60A5FA'}; 
+                                border-radius: 50%; 
+                                width: 40px; 
+                                height: 40px; 
+                                display: flex; 
+                                justify-content: center; 
+                                align-items: center; 
+                                margin-right: 15px;
+                            ">{companion[0]}</span>
+                            <div style="flex-grow: 1;">
+                                <h4 style="margin: 0; color: #333;">{companion}</h4>
+                                <div style="display: flex; gap: 20px; font-size: 14px; margin-top: 5px;">
+                                    <span>**已付:** {summary['paid']:,.0f} KRW</span>
+                                    <span>**應付:** {summary['owed']:,.0f} KRW</span>
+                                </div>
+                            </div>
+                            <div style="
+                                text-align: right; 
+                                padding: 8px 15px; 
+                                border-radius: 5px; 
+                                background-color: {'#D1FAE5' if color_class == 'green' else '#FEE2E2' if color_class == 'red' else '#EFF6FF'};
+                                color: {'#065F46' if color_class == 'green' else '#991B1B' if color_class == 'red' else '#1E40AF'};
+                                font-weight: bold;
+                                min-width: 120px;
+                            ">
+                                {status_label}
+                                <div style="font-size: 18px; margin-top: 2px;">{status_amount}</div>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            # --- 4. 流水帳 ---
+            st.markdown("### 📜 最近記錄 (流水帳)")
+            
+            if not expense_records:
+                st.info("尚無消費記錄。")
+            else:
+                for record in expense_records:
+                    split_count = len(record.get('splits', []))
+                    
+                    st.markdown(f"""
+                        <div style="
+                            padding: 10px 15px; 
+                            margin-bottom: 8px; 
+                            border-radius: 5px; 
+                            background-color: #F9FAFB;
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            border: 1px solid #EDEDED;
+                        ">
+                            <div style="flex-grow: 1;">
+                                <h5 style="margin: 0 0 4px 0; color: #1F2937;">{record.get('name', '未知項目')}</h5>
+                                <p style="margin: 0; font-size: 12px; color: #6B7280;">
+                                    {record.get('payer', 'N/A')} 先付 • 分給 {split_count} 人
+                                </p>
+                            </div>
+                            <div style="text-align: right;">
+                                <h5 style="margin: 0; color: #1F2937;">
+                                    {record.get('amount', 0):,.0f} {record.get('currency', 'KRW')}
+                                </h5>
+                                <p style="margin: 0; font-size: 12px; color: #9CA3AF;">
+                                    {record.get('date', 'N/A')}
+                                </p>
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+# --- 無法連線的提示 ---
+if not db:
+    st.markdown("## ❌ 系統初始化失敗")
+    st.error("無法連線到您的 Firebase 資料庫。請檢查您的連線設定。")
     page_icon="✈️"
 )
 
