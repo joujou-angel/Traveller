@@ -240,7 +240,7 @@ with tabs[3]: # 💰 記帳 頁面 (Placeholder)
                 st.subheader("旅伴分攤參考")
                 st.write(f"可分攤的旅伴: {', '.join(st.session_state.companions)}")
                 
-        with tabs[4]: # 💬 助手 頁面 (Placeholder)
+with tabs[4]: # 💬 助手 頁面 (Placeholder)
             st.header("即時翻譯與助手")
             st.info("未來可整合 Gemini API，實現即時翻譯或旅遊問題問答。")
 
