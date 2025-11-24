@@ -206,7 +206,7 @@ if db and master_info_data:
 st.markdown("</div>", unsafe_allow_html=True)
 
 # --- 旅伴管理區塊 (暫時保持 Session State，未來升級至 Firebase) ---
-    with st.expander("👥 旅伴管理 (用於記帳分攤)", expanded=True):
+with st.expander("👥 旅伴管理 (用於記帳分攤)", expanded=True):
                 st.markdown("目前的旅伴清單:")
                 st.markdown(f"**{', '.join(st.session_state.companions)}**")
                 
