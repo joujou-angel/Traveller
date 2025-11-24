@@ -78,8 +78,8 @@ if db:
         st.markdown("## 旅遊筆記本")
         st.markdown(f"我的旅行 ({datetime.now().year}/{datetime.now().month}) | **數據源：Firebase**")
         
-        # 從 Firebase 獲取當前旅伴清單
-        current_companions = trip_data.get('companions', ["自己"])
+        # 從 Firebase 獲取當前旅伴清單 - 預設為空列表 []
+        current_companions = trip_data.get('companions', [])
         
         # --- 核心更新函式 ---
         def update_companions_in_firebase(new_list):
@@ -298,10 +298,13 @@ if db:
             # --- [整合舊版功能] HTML 結尾 ---
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # --- 旅伴管理區塊 (升級至 Firebase 永久化) ---
+            # --- 旅伴管理區塊 (升級至 Firebase 永久化，無預設「自己」) ---
             with st.expander("👥 旅伴管理 (用於記帳分攤)", expanded=True):
                 st.markdown("目前的旅伴清單:")
-                st.markdown(f"**{', '.join(current_companions)}**")
+                if current_companions:
+                    st.markdown(f"**{', '.join(current_companions)}**")
+                else:
+                    st.info("目前旅伴清單為空。請新增您的暱稱和其他旅伴。")
                 
                 new_companion = st.text_input("新增旅伴暱稱", key="new_comp")
                 
@@ -309,12 +312,10 @@ if db:
                 
                 with col_add:
                     if st.button("➕ 新增旅伴", key="add_comp_btn"):
+                        # 檢查：非空且不在現有清單中
                         if new_companion and new_companion not in current_companions:
-                            if new_companion == "自己":
-                                st.warning("「自己」已是預設旅伴，不需重複新增。")
-                            else:
-                                new_list = current_companions + [new_companion]
-                                update_companions_in_firebase(new_list)
+                            new_list = current_companions + [new_companion]
+                            update_companions_in_firebase(new_list)
                         elif new_companion:
                              st.warning(f"旅伴 '{new_companion}' 已存在於清單中。")
                         else:
@@ -322,10 +323,11 @@ if db:
                 
                 with col_clear:
                     if st.button("🗑️ 清空旅伴清單", key="clear_comp_btn"):
-                        if current_companions != ["自己"]:
-                            update_companions_in_firebase(["自己"])
+                        # 清空列表到 []
+                        if current_companions:
+                            update_companions_in_firebase([])
                         else:
-                             st.info("旅伴清單已經是預設的「自己」。")
+                             st.info("旅伴清單目前已清空。")
             
         with tabs[1]: # 🗺️ 行程 頁面 (Placeholder)
             st.header("行程細節")
@@ -342,6 +344,9 @@ if db:
                 st.subheader("旅伴分攤參考")
                 # 此處直接使用從 Firebase 讀取的 current_companions
                 st.write(f"可分攤的旅伴: {', '.join(current_companions)}")
+            else:
+                 st.subheader("旅伴分攤參考")
+                 st.info("請先在「資訊」頁面新增旅伴才能進行分攤記帳。")
                 
         with tabs[4]: # 💬 助手 頁面 (Placeholder)
             st.header("即時翻譯與助手")
