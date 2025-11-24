@@ -109,22 +109,31 @@ def add_expense_record(db, record_data):
         st.error(f"❌ 記帳記錄寫入失敗：{e}")
         return False
 
-# --- 新增: 行程資料操作函式 ---
-
+# --- 行程資料操作函式 (修正：移除 order_by 以繞過複合索引限制) ---
 def get_daily_itinerary(db, date_str):
-    """從 Firestore 讀取特定日期的行程記錄"""
+    """
+    從 Firestore 讀取特定日期的行程記錄。
+    [重要修正]: 移除 order_by('time')，改在 Python 記憶體中排序，
+    以避免因缺少複合索引而導致的 400 錯誤。
+    """
     if not db:
         return []
     try:
-        # 查詢特定日期的所有文件，並依照時間 (time) 排序
-        docs = db.collection('daily_itineraries').where('date', '==', date_str).order_by('time').get()
+        # 僅使用 where 篩選日期 (只需要單一索引)
+        docs = db.collection('daily_itineraries').where('date', '==', date_str).get()
         itinerary = []
         for doc in docs:
             record = doc.to_dict()
             record['id'] = doc.id
             itinerary.append(record)
+            
+        # 透過 Python 進行記憶體內排序 (確保依時間排序)
+        # 使用 lambda 函數來指定按 'time' 欄位排序
+        itinerary.sort(key=lambda x: x.get('time', '23:59')) 
+        
         return itinerary
     except Exception as e:
+        # 這裡會捕獲錯誤，但如果索引問題已修正，就不會進入這個區塊
         st.error(f"❌ 讀取 {date_str} 行程失敗: {e}")
         return []
 
@@ -587,6 +596,7 @@ if db:
             st.markdown("---")
 
             # --- 3. 讀取並顯示當日行程 ---
+            # 由於 get_daily_itinerary 已修正為記憶體內排序，這裡可以直接使用結果
             daily_itinerary = get_daily_itinerary(db, selected_date)
             
             if not daily_itinerary:
